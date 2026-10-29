@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+# user data never lives here (it is in ~/Documents/Toonbox Data), but just in case:
+library/
+videos/
+tools/
+.work/
+.models/
+settings.json

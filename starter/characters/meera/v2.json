@@ -1,0 +1,17 @@
+{
+  "name": "Meera",
+  "body": "Simple clothes",
+  "head": "Oval",
+  "hair": "Long",
+  "hair_color": "#2B1E1A",
+  "skin": "#F3CFAE",
+  "eyes": "Big",
+  "top": "#F4F4F6",
+  "bottom": "Pants",
+  "bottom_color": "#3B6DB5",
+  "extras": [
+    "Hair bow"
+  ],
+  "height": 0.95,
+  "saved": "2026-10-29 16:17"
+}
