@@ -27,8 +27,19 @@ def speech_model():
         print(f"Couldn't download the speech model now ({e}). The app will try again when you first use it.")
 
 
+def voice_model():
+    try:
+        from .audio import get_voice_model, VOICE_MODEL
+        if not VOICE_MODEL.exists():
+            get_voice_model()
+            print("Voice-recognition model ready.")
+    except Exception as e:
+        print(f"Couldn't set up the voice-recognition model now ({e}). The app will try again later.")
+
+
 def main():
     speech_model()
+    voice_model()
     if any(TOOLS.glob("**/rhubarb")):
         return
     sysname = {"Darwin": "macOS", "Linux": "Linux", "Windows": "Windows"}.get(platform.system())

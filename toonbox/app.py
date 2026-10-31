@@ -11,7 +11,7 @@ import skia
 from PIL import Image
 
 from . import backgrounds, cast, jobs, lipsync, pipeline, props, toon
-from .paths import ROOT, VIDEOS, WORK, load_settings, save_settings
+from .paths import ROOT, DATA, VIDEOS, WORK, load_settings, save_settings
 
 CSS = """
 .gradio-container {max-width: 1220px !important}
@@ -333,10 +333,14 @@ def _loc_gallery():
     return [(backgrounds.preview(n), n) for n in backgrounds.list_locations()]
 
 
-def save_set(key, model, whisper, fps):
+MOTION = {"Held poses — snaps between poses, cuts to whoever speaks (cartoon-shorts style)": "held",
+          "Smooth — everything moves gently all the time (older style)": "smooth"}
+
+
+def save_set(key, model, whisper, fps, motion):
     s = load_settings()
     s.update({"claude_api_key": key.strip(), "claude_model": model.strip() or "claude-sonnet-5-5",
-              "whisper_model": whisper, "fps": int(fps)})
+              "whisper_model": whisper, "fps": int(fps), "motion": MOTION.get(motion, "held")})
     save_settings(s)
     return "Settings saved."
 
@@ -495,17 +499,19 @@ def build():
             whisper = gr.Dropdown(["large-v3-turbo", "medium", "small"], value=s.get("whisper_model"),
                                   label="Speech-to-text model", info="large-v3-turbo = best for Hindi; small = fastest")
             fps = gr.Radio([12, 24, 30], value=s.get("fps", 24), label="Frames per second")
+            motion = gr.Radio(list(MOTION), value=next((k for k, v in MOTION.items() if v == s.get("motion", "held")),
+                                                        list(MOTION)[0]), label="Motion style")
             ssave = gr.Button("Save settings", variant="primary")
             smsg = gr.Markdown()
             gr.Markdown(_status())
-            ssave.click(save_set, [key, model, whisper, fps], smsg)
+            ssave.click(save_set, [key, model, whisper, fps, motion], smsg)
 
         ui.load(lambda: (gr.update(choices=cast.names()), _cast_gallery()), None, [openc, gal])
     return ui
 
 
 def main():
-    build().launch(inbrowser=True, theme=THEME, css=CSS, allowed_paths=[str(ROOT)], server_name="127.0.0.1")
+    build().launch(inbrowser=True, theme=THEME, css=CSS, allowed_paths=[str(ROOT), str(DATA)], server_name="127.0.0.1")
 
 
 if __name__ == "__main__":

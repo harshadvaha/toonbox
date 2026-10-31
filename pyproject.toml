@@ -1,6 +1,6 @@
 [project]
 name = "toonbox"
-version = "3.2.0"
+version = "3.4.0"
 description = "Audio + saved cartoon characters -> simple 2D cartoon video, fully local."
 requires-python = ">=3.11,<3.13"
 dependencies = [
@@ -11,6 +11,7 @@ dependencies = [
   "scikit-learn",
   "imageio-ffmpeg",
   "faster-whisper>=1.1",
+  "sherpa-onnx>=1.12",
   "skia-python>=138",
   "anthropic",
 ]

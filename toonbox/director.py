@@ -365,13 +365,90 @@ def rule_plan(lines, cast, locations, notes, duration, seed=1, overrides=None):
     return _finish({"scenes": scenes, "shots": shots, "acts": acts, "emotes": emotes}, duration)
 
 
-def _finish(plan, duration):
+# ------------------------------------------------------------------ held-pose camera (cut-based storytelling)
+# Words that mean the characters do something TOGETHER, so both must be in the frame.
+TOGETHER = re.compile(W("hug", "hugs", "hugging", "kiss", "fight", "fighting", "push", "pushed", "slap", "slapped", "hit",
+                        "punch", "hold my hand", "hold hands", "dance", "dancing", "massage", "give", "gave", "take this",
+                        "here you go", "here,? take", "catch", "together", "both of us", "come here", "high five",
+                        "hand me", "pass me", "let's go", "lets go", "chalo", "pakdo", "lo", "le lo", "do mujhe",
+                        "gale", "maar", "mara", "dhakka", "saath", "dono"), re.I)
+
+
+def _together(text):
+    return bool(TOGETHER.search(text or ""))
+
+
+def held_shots(plan, lines, cast, notes, duration, overrides=None):
+    """Camera for the held-pose style, like Indian cartoon shorts:
+    - an opening wide shot (everyone in frame) to set the scene,
+    - then mostly single-character close-ups that CUT to whoever is speaking,
+    - silent reaction cutaways to the listener in pauses and in the middle of long lines,
+    - a wide two-shot whenever the characters do something together (hug, give, fight, come here…),
+      when an animal/prop walks in, when both move at once, or to re-establish after many close-ups.
+    Every shot has a slow push-in so held drawings never look frozen."""
+    overrides = overrides or {}
+    shots = [{"start": 0.0, "kind": "wide", "focus": None, "push": 0.05, "shake": None}]
+    scene_starts = [s["start"] for s in plan["scenes"][1:]]
+    entries = [f["t0"] for s in plan["scenes"] for f in s.get("floor", []) if f.get("enter")]
+    closes = 0
+    for i, l in enumerate(lines):
+        sp, d, text = l["speaker"], l["end"] - l["start"], l.get("text") or ""
+        o = overrides.get(i, {})
+        others = [c for c in cast if c != sp]
+        nxt = lines[i + 1] if i + 1 < len(lines) else None
+        t0 = max(0.0, l["start"] - 0.08)  # cut just before the first word, like an editor would
+        strong = l.get("loud", 0) > 1.1 or "!" in text
+        shake = (l["start"], l["start"] + 0.4) if (bool(re.search(r"\b[A-Z]{3,}\b", text)) or l.get("loud", 0) > 1.5) \
+            else None
+        new_scene = any(l["start"] - 1.0 <= s <= l["start"] + 0.1 for s in scene_starts)
+        animal = any(l["start"] - 1.8 <= e <= l["end"] for e in entries)
+        cam = o.get("camera") if o.get("camera") in ("wide", "close") else None
+        if cam is None:
+            if not others or new_scene or _together(text) or animal or closes >= 6:
+                cam = "wide"
+            elif i == 0 and l["start"] < 1.2 and d < 2.5:
+                cam = "wide"  # let the opening wide shot breathe for the first short line
+            else:
+                cam = "close"
+        if i == 0 and cam == "wide":
+            shots[0]["shake"] = shake
+        else:
+            shots.append({"start": t0, "kind": cam, "focus": sp if cam == "close" else None,
+                          "push": 0.07 if strong else 0.05, "shake": shake, "line": True})
+        closes = closes + 1 if cam == "close" else 0
+        # the listener = whoever this line answers (last different speaker), not just the first other character
+        prev_sp = next((lines[j]["speaker"] for j in range(i - 1, -1, -1) if lines[j]["speaker"] != sp), None)
+        listener = prev_sp if prev_sp in others else (others[0] if others else None)
+        # reaction cutaway only in the middle of a really long line (the speaker keeps talking off-screen)
+        if cam == "close" and listener and d > 6.0:
+            mid = l["start"] + d * 0.5
+            shots.append({"start": mid, "kind": "close", "focus": listener, "push": 0.04, "shake": None})
+            shots.append({"start": mid + 1.2, "kind": "close", "focus": sp, "push": 0.05, "shake": None})
+        # reaction shot in the pause after a line: the listener's face tells the joke
+        gap = (nxt["start"] if nxt else duration) - l["end"]
+        if others and gap > 0.55 and (strong or "?" in text or gap > 1.2 or cam == "close"):
+            c = nxt["speaker"] if nxt and nxt["speaker"] != sp else listener
+            if not (nxt and nxt["speaker"] == c and gap < 0.9):  # the next line will cut to them anyway
+                shots.append({"start": l["end"] + 0.12, "kind": "close", "focus": c, "push": 0.04, "shake": None})
+    plan["shots"] = shots
+    return _finish(plan, duration, min_len=0.6, later_wins=True)
+
+
+def _finish(plan, duration, min_len=0.8, later_wins=False):
     shots = sorted(plan["shots"] or [{"start": 0, "kind": "wide", "focus": None, "push": 0.03, "shake": None}],
                    key=lambda s: s["start"])
     shots[0]["start"] = 0.0
     merged = []
-    for s in shots:  # no shot shorter than 0.8 s, no two identical shots in a row
-        if merged and (s["start"] - merged[-1]["start"] < 0.8):
+    for s in shots:  # no shot shorter than min_len, no two identical shots in a row
+        if merged and (s["start"] - merged[-1]["start"] < min_len):
+            if later_wins and len(merged) > 1:  # held style
+                # a shot of someone SPEAKING is never dropped or moved: the speaker must be on screen
+                if s.get("line") and merged[-1].get("line"):
+                    if (s["kind"], s["focus"]) != (merged[-1]["kind"], merged[-1]["focus"]):
+                        merged.append(s)
+                elif s.get("line"):  # a reaction shot is in the way: the speaker's shot replaces it
+                    merged[-1] = s
+                continue  # a reaction shot too close to a speaking shot is skipped
             if s["kind"] == "close" and merged[-1]["kind"] == "wide" and len(merged) > 1:
                 merged[-1] = {**s, "start": merged[-1]["start"]}
             continue
@@ -397,7 +474,8 @@ emotion: {emotions}
 gesture: {gestures}
 body: {body}
 emote: {emotes} or "none"
-camera: wide | close
+camera: wide (both characters in frame — use when they do something together: hug, give, fight, push) |
+        close (only the speaker in frame — the default for normal talking)
 
 LINES (id. speaker [start-end] text):
 {lines}
@@ -438,5 +516,8 @@ def make_plan(lines, cast, locations, notes, duration, settings, log=print):
     if (not locations or locations == ["Auto"]) and loc:
         locations = [loc]
     plan = rule_plan(lines, cast, locations, notes, duration, seed=int(duration * 1000) % 9973, overrides=over)
+    if settings.get("motion", "held") == "held":
+        plan = held_shots(plan, lines, cast, notes, duration, over)
     plan["by"] = by
+    plan["motion"] = settings.get("motion", "held")
     return plan

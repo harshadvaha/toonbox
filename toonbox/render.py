@@ -1,5 +1,6 @@
 """Puts it all together on screen: background, props, characters, emotes, camera, captions -> MP4."""
 import math
+from pathlib import Path
 import subprocess
 
 import numpy as np
@@ -8,6 +9,7 @@ from PIL import Image
 
 from . import backgrounds, emotes, props as P
 from .anim import Actor, Animator
+from .held import HeldAnimator
 from .paths import ffmpeg_exe
 from .toon import Toon, _font
 
@@ -29,7 +31,8 @@ class Stage:
         self.toons = [Toon(s) for s in specs]
         self.names = [s["name"] for s in specs]
         self.actors = self._layout()
-        self.anim = Animator(self.actors, plan, lines, mouth, env, fps)
+        self.held = plan.get("motion", "held") == "held"
+        self.anim = (HeldAnimator if self.held else Animator)(self.actors, plan, lines, mouth, env, fps)
         self._bg = {}
         self.duration = plan["duration"]
         self.frames = int(math.ceil(self.duration * fps)) + fps // 2  # whole audio + a short tail
@@ -96,8 +99,13 @@ class Stage:
         sh = shot.get("shake")
         if sh and sh[0] <= t <= sh[1]:
             k = 1 - (t - sh[0]) / max(0.05, sh[1] - sh[0])
-            cx += self.rng.normal() * self.W * 0.006 * k
-            cy += self.rng.normal() * self.H * 0.004 * k
+            if self.held:  # shake jumps on 2s too, so it reads as a cartoon jolt
+                r = np.random.default_rng(int(t * self.fps) // 2)
+                cx += r.normal() * self.W * 0.008 * k
+                cy += r.normal() * self.H * 0.005 * k
+            else:
+                cx += self.rng.normal() * self.W * 0.006 * k
+                cy += self.rng.normal() * self.H * 0.004 * k
         return z, cx, cy
 
     def _shot(self, t):
@@ -190,8 +198,11 @@ class Stage:
         cv.drawImageRect(bg, skia.Rect.MakeWH(self.W, self.H), skia.SamplingOptions(skia.FilterMode.kLinear))
         # soft floor shadow strip so characters sit in the room
         self._back_props(cv, scene, t)
+        solo = shot.get("focus") if (self.held and shot["kind"] == "close") else None
         for a in self.actors:
             pose, y_off = poses[a.name]
+            if solo and a.name != solo and solo in self.names:
+                continue  # held style: a close-up shows only that character, like a cutaway
             sh = skia.Paint(Color=skia.ColorSetARGB(40, 0, 0, 0), AntiAlias=True)
             if not scene.get("front"):
                 cv.drawOval(skia.Rect.MakeLTRB(a.x - a.h * 0.2, self.feet_y - a.h * 0.02, a.x + a.h * 0.2,
@@ -216,9 +227,13 @@ class Stage:
             p = (t - e["t"]) / e["dur"]
             size = int(a.h * 0.2)
             s = 1.0
-            if p < 0.15:
+            if self.held:  # pops in with one bigger drawing, then holds
+                s = 1.2 if (t - e["t"]) * self.fps < 2 * max(1, round(self.fps / 12)) else 1.0
+            elif p < 0.15:
                 s = 0.3 + 0.95 * math.sin(p / 0.15 * math.pi / 2) + 0.15 * math.sin(p / 0.15 * math.pi)
             alpha = 1.0 if p < 0.8 else max(0.0, 1 - (p - 0.8) / 0.2)
+            if self.held:
+                alpha = 1.0
             img = emotes.draw(e["name"], size)
             key = ("emote", e["name"], size)
             sk = self._bg.get(key)
@@ -226,7 +241,7 @@ class Stage:
                 sk = self._bg[key] = _skimg(img)
             side = 1 if a.toward < 0 else -1
             x = a.x + side * a.h * 0.22
-            y = self.feet_y - a.h * 1.08 + math.sin(t * 6) * a.h * 0.005
+            y = self.feet_y - a.h * 1.08 + (0 if self.held else math.sin(t * 6) * a.h * 0.005)
             w = size * s
             paint = skia.Paint(Alphaf=alpha)
             cv.drawImageRect(sk, skia.Rect.MakeXYWH(x - w / 2, y - w / 2, w, w),
@@ -240,6 +255,12 @@ class Stage:
         if not txt:
             return
         size = self.W * (0.05 if self.vertical else 0.032)
+        y = self.H * (0.13 if self.vertical else 0.86)
+        if any(ord(ch) > 0x24F for ch in txt):  # Hindi / Gujarati etc. need proper letter joining
+            img = _indic_subtitle(txt, size, self.W * 0.82)
+            if img is not None:
+                cv.drawImage(img, (self.W - img.width()) / 2, y - size * 1.05)
+                return
         font = _font(size)
         words = txt.split()
         rows, cur = [], ""
@@ -252,7 +273,6 @@ class Stage:
             else:
                 cur = test
         rows.append(cur)
-        y = self.H * (0.13 if self.vertical else 0.86)
         for r in rows[:3]:
             tw = font.measureText(r)
             x = (self.W - tw) / 2
@@ -322,3 +342,69 @@ def render_video(stage, audio_path, out_path, progress=None, log=print, start=0.
     if proc.returncode:
         raise RuntimeError("Video encoder failed.")
     return out_path
+
+
+# ------------------------------------------------------------------ subtitles in Indian scripts
+FONT_DIR = Path(__file__).resolve().parent / "fonts"
+_INDIC_FONTS = {
+    "deva": [FONT_DIR / "NotoSansDevanagari-Bold.ttf", Path("/System/Library/Fonts/Kohinoor.ttc")],
+    "gujr": [Path("/System/Library/Fonts/KohinoorGujarati.ttc"),
+             Path("/System/Library/Fonts/Supplemental/GujaratiMT.ttc"),
+             Path("/System/Library/Fonts/Supplemental/Gujarati Sangam MN.ttc")],
+}
+_sub_cache = {}
+
+
+def _script(txt):
+    if any(0x0A80 <= ord(c) <= 0x0AFF for c in txt):
+        return "gujr"
+    return "deva"
+
+
+def _indic_subtitle(txt, size, maxw):
+    """Draw the subtitle with Pillow (it joins Indian letters correctly), return it as a skia image."""
+    key = (txt, round(size), round(maxw))
+    if key in _sub_cache:
+        return _sub_cache[key]
+    from PIL import Image, ImageDraw, ImageFont
+    font = None
+    for p in _INDIC_FONTS[_script(txt)] + _INDIC_FONTS["deva"]:
+        if p.exists():
+            try:
+                font = ImageFont.truetype(str(p), int(size), layout_engine=ImageFont.Layout.RAQM)
+                break
+            except Exception:
+                try:
+                    font = ImageFont.truetype(str(p), int(size))
+                    break
+                except Exception:
+                    continue
+    if font is None:
+        _sub_cache[key] = None
+        return None
+    stroke = max(2, int(size * 0.09))
+    probe = ImageDraw.Draw(Image.new("RGBA", (8, 8)))
+    rows, cur = [], ""
+    for w in txt.split():
+        test = (cur + " " + w).strip()
+        if probe.textlength(test, font=font) > maxw and cur:
+            rows.append(cur)
+            cur = w
+        else:
+            cur = test
+    rows.append(cur)
+    rows = rows[:3]
+    lh = int(size * 1.45)
+    W = int(maxw + stroke * 4)
+    im = Image.new("RGBA", (W, lh * len(rows) + stroke * 4), (0, 0, 0, 0))
+    d = ImageDraw.Draw(im)
+    for i, r in enumerate(rows):
+        tw = d.textlength(r, font=font)
+        d.text(((W - tw) / 2, stroke * 2 + i * lh), r, font=font, fill=(255, 255, 255, 255),
+               stroke_width=stroke, stroke_fill=(20, 20, 24, 255))
+    arr = np.ascontiguousarray(np.array(im))
+    img = skia.Image.fromarray(arr, colorType=skia.ColorType.kRGBA_8888_ColorType)
+    if len(_sub_cache) > 200:
+        _sub_cache.clear()
+    _sub_cache[key] = img
+    return img
